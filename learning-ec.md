@@ -76,18 +76,19 @@ telling that whatever implements `FiniteField` has to have the `Sized` trait. Th
 ```rust=
 use std::{
     fmt::{Debug, Display},
-    ops::{Add, Div, Mul, Neg, Sub},
+    ops::{Add, AddAssign, Div, Mul, MulAssign, Neg, Sub, SubAssign},
 };
 
 pub trait FiniteField:
     Sized               // Size known at compile time
     + From<u64>         // Can create an element from u64
     + Debug + Display   // For debugging and printing
+    + Copy              // Easy to copy during assignment
     // Mathemetical Operations ----
     + Neg<Output=Self>
-    + Add<Self, Output=Self>
-    + Sub<Self, Output=Self>
-    + Mul<Self, Output=Self>
+    + Add<Self, Output=Self> + AddAssign<Self> // For + and +=
+    + Sub<Self, Output=Self> + SubAssign<Self> // For - and -=
+    + Mul<Self, Output=Self> + MulAssign<Self> // For * and *=
     + Div<Self, Output=Option<Self>>
     // Mathemetical Operations ----
 {
@@ -111,7 +112,7 @@ pub trait FiniteField:
     /// Raise element to some power
     fn pow(&self, exp: u64) -> Self;
 
-    // Export to u64
+    /// Export to u64
     fn as_u64(&self) -> u64;
 }
 ```
@@ -138,11 +139,120 @@ let a: FiniteField = 41u64.into()
 ```
 However, the default implementation of `Into<T>` is provided by rust if `From<U>` is defined. So while implementing `From<u64>` makes both the above possible, with just `Into<T>`, the former may not be possible.
 
+## The two curves $G_1$ and $G_2$ and pairing function $e$
+We create traits for points on both the curves $G_1$ and $G_2$. Since most operation is going to happen in $G_1$ and we use $G_2$ just to allow for pairing, we define the following traits:
+```rust=
+pub trait G1Point:
+    Copy                // Representation small enough for efficient copy
+    + Debug + Display   // For debugging and printing
+    + PartialEq         // Allow for equality testing but may not be transitively equal
+    + Hash              // A hashable type     
+    + Ord               // Total order 
+    // Mathemetical Operations ----
+    + Neg<Output=Self>
+    + Sub<Output=Self>
+    + Add<Output=Self>
+    + Mul<Self::SubField, Output = Self>
+    // Mathemetical Operations ----
+{
+    type Field: FiniteField;
+    type SubField: FiniteField;
+
+    /// Constructor
+    fn new(x: Self::Field, y: Self::Field) -> Self;
+
+    /// Provide generator element
+    fn generator() -> Self;
+
+    /// Give the identity element
+    fn identity() -> Self;
+    /// Check wheter current point is an identity point
+    fn is_identity(&self) -> bool;
+
+    /// Provide the x and y coordinates of the point
+    fn x(&self) -> &Self::Field;
+    fn y(&self) -> &Self::Field;
+}
+```
+Two associated types exist for `G1Point` namely `Field` and `SubField`. (TODO: Describe why).
+
+Similarly, we describe:
+```rust=
+pub trait G2Point:
+    Copy                // Representation small enough for efficient copy
+    + Debug + Display   // For debugging and printing
+    + PartialEq         // Allow for equality testing but may not be transitively equal
+    // Mathemetical Operations ----
+    + Neg<Output=Self>
+    + Sub<Output=Self>
+    + Add<Output=Self>
+    + Mul<Self::SubField, Output = Self>
+    // Mathemetical Operations ----
+{
+    type Field: FiniteField;
+    type SubField: FiniteField;
+
+    /// Constructor
+    fn new(x: Self::Field, y: Self::Field) -> Self;
+
+    /// Provide generator element
+    fn generator() -> Self;
+
+    /// Provide the x and y coordinates of the point
+    fn x(&self) -> &Self::Field;
+    fn y(&self) -> &Self::Field;
+
+    /// Get the embedding degree of the curve
+    fn embedding_degree() -> u64;
+}
+```
+
+For pairing, we define the target groupt $G_T$ and a pairing trait as follows:
+```rust=
+pub trait GTPoint: Display + Copy + PartialEq + Mul {
+    type S;
+    fn pow(&self, n: Self::S) -> Self;
+}
+
+pub trait Pairing {
+    type G1: G1Point;
+    type G2: G2Point;
+    type GT: GTPoint;
+
+    fn pairing(p: Self::G1, q: Self::G2) -> Self::GT;
+}
+```
+
+## Implementing a concrete field: the u64 field
+
+
+### Finding the inverse: Extended euclidean algorithm
+What does it mean for an element to have an inverse in our u64 field? We deem this property to hold true for any non-zero element $a$ in the field:
+$$
+a \times a^{-1} = a^{-1} \times a = 1
+$$
+where $1$ is the multiplicative identity. Of course, all of this is done mod $p$.
+
+To find the inverse of some element $a$, we resort to first find coefficients that satisfy [Bézout's identity](https://en.wikipedia.org/wiki/B%C3%A9zout%27s_identity) for which we need to deploy extended euclidean algorithm for element $a$ and field prime $p$.
+
+> **Bézout's identity**: Let $a$ and $b$ be integers with greatest common divisor $d$. Then there exist integers $x$ and $y$ such that $ax + by = d$. Moreover, the integers of the form $az + bt$ are exactly the multiples of $d$.
+
+[This excellent video](https://www.youtube.com/watch?v=hB34-GSDT3k) describes how extended euclidean algorithm can be used to get these coefficients $x$ and $y$.
+
+Once we have the coefficients $x$ and $y$, we see using following (assuming $p$ to be prime and hence $a$ and $p$ are coprimes):
+$$
+    xa + yp = 1 \\
+    (xa + yp) \pmod p \equiv 1 \pmod p \\
+    xa \pmod p \equiv 1 \pmod p \\
+    x = a^{-1}
+$$
+Hence we see $x$ is inverse of $a$ and we don't really need $y$ for calculating the inverse. 
+
 ## Appendix
 <a name="properties-bil-map"></a>
 ### Properties of a bilinear maps (ChatGPT)
 
-Bilinear maps possess several important properties. Let's consider a bilinear map B: V × W → X, where V, W, and X are vector spaces over the same field. The properties of a bilinear map are as follows:
+Bilinear maps possess several important properties. Let's consider a bilinear map $B$: $V$ × $W$ → $X$, where V, W, and X are vector spaces over the same field. The properties of a bilinear map are as follows:
 
 Linearity in the first argument: For any fixed w in W, the function v ↦ B(v, w) is a linear transformation from V to X. This means that it satisfies the following properties:
 
